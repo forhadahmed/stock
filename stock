@@ -1,0 +1,644 @@
+#!/usr/bin/python
+################################################################################
+# 
+# stocks - monitor the stock-market right from the Unix terminal!
+#
+# March 2014, Forhad Ahmed
+#
+################################################################################
+
+try: # python 3
+  from urllib.request import Request, urlopen
+  from urllib.parse import urlencode
+except ImportError: # python 2
+  from urllib2 import Request, urlopen
+  from urllib import urlencode
+#end try
+
+import os, sys, time, signal, thread, curses, calendar, re, traceback
+from datetime import datetime
+
+
+################################################################################
+# Yahoo finance query function
+################################################################################
+
+def yq(s, stat):
+    url = 'http://finance.yahoo.com/d/quotes.csv?s=%s&f=%s' % (s, stat)
+    req = Request(url)
+    resp = urlopen(req)
+    return str(resp.read().decode('utf-8').strip()).replace("\r", "")
+#end def
+
+################################################################################
+# SIGINT handler (put the terminal back to normal mode)
+################################################################################
+
+def cleanup(sig, fr): 
+    global win
+    win.keypad(0)
+    curses.nocbreak()
+    curses.echo()
+    curses.endwin()
+    print("[quit]")
+    sys.exit()
+#end def
+ 
+signal.signal(signal.SIGINT, cleanup)
+
+################################################################################
+# Curses initialization
+################################################################################
+
+win = None
+COLOR_RED = None
+COLOR_GREEN = None
+
+def init_curses ():
+
+    global win, COLOR_RED, COLOR_GREEN
+
+    win = curses.initscr() 
+    curses.noecho()
+    win.nodelay(1)
+    win.keypad(1)
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_RED, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+
+    COLOR_RED   = 1
+    COLOR_GREEN = 2
+
+    try: 
+      curses.curs_set(0) # try to disappear the cursor
+    except: 
+      pass
+    #end try
+#end def
+
+################################################################################
+# The different stock attributes that can be queried
+################################################################################
+
+STOCK_SYMBOL     = 0
+STOCK_COMPANY    = 1
+STOCK_PRICE      = 2
+STOCK_PPRICE     = 3 # meta
+STOCK_RANGE_DAY  = 4
+STOCK_52_HIGH    = 5
+STOCK_52_LOW     = 6
+STOCK_RANGE_52   = 7 # meta
+STOCK_CHANGE_P   = 8
+STOCK_CHANGE_D   = 9
+STOCK_MARKET_CAP = 10 # string (display)
+STOCK_MARKET_VAL = 11 # meta (numeric)
+STOCK_VOLUME     = 12
+STOCK_AVG_VOLUME = 13
+STOCK_VOL_AVG    = 14 # meta
+STOCK_ATTR_MAX   = 15
+
+################################################################################
+# Header strings and column widths associated with the various stock attributes
+################################################################################
+
+VIEW_HEADER = [0]*STOCK_ATTR_MAX
+VIEW_HEADER[STOCK_SYMBOL]     = ["Symbol",      12]
+VIEW_HEADER[STOCK_COMPANY]    = ["Company",     20]
+VIEW_HEADER[STOCK_PRICE]      = ["$Price",      15]
+VIEW_HEADER[STOCK_RANGE_DAY]  = ["$Range (Day)",25]
+VIEW_HEADER[STOCK_RANGE_52]   = ["$Range (52W)",25]
+VIEW_HEADER[STOCK_CHANGE_P]   = ["%Change",     14]
+VIEW_HEADER[STOCK_CHANGE_D]   = ["$Change",     14]
+VIEW_HEADER[STOCK_MARKET_CAP] = ["Market Cap",  15]
+VIEW_HEADER[STOCK_VOL_AVG]    = ["Vol  /  Avg", 20]
+ 
+
+################################################################################
+# The different views (based on terminal width)
+################################################################################
+
+views = [[STOCK_SYMBOL, STOCK_PRICE, STOCK_CHANGE_D]]
+ 
+view = views[0][:]
+view.append(STOCK_RANGE_DAY)
+views.append(view)
+
+view = view[:]
+view.append(STOCK_MARKET_CAP)
+views.append(view)
+
+view = view[:]
+view.append(STOCK_VOL_AVG)
+views.append(view)
+
+cview = 0
+
+################################################################################
+# The different timezones
+################################################################################
+    
+TIMEZONE_EST = 0
+TIMEZONE_PST = 1
+TIMEZONE_MAX = 2
+
+TIMEZONES = [0]*TIMEZONE_MAX
+TIMEZONES[TIMEZONE_EST] = ["EST", -4]
+TIMEZONES[TIMEZONE_PST] = ["PST", -7]
+
+timezone = TIMEZONE_EST
+
+delta = 0
+
+################################################################################
+# Time calibration
+################################################################################
+
+def calibrate_delta():
+    
+    global delta
+ 
+    try:
+      tm = urlopen('http://www.google.com').info().dict['date']
+    except: 
+      print "% Unable to connect to Google"
+      cleanup(0,0)
+    #end try
+    
+    tz = tm.strip()[-3:] # 'GMT'
+    ts = tm[tm.find(",")+1:].strip()[:-3].strip() # leave out the 'GMT'
+    ts = datetime.strptime(ts, '%d %b %Y %H:%M:%S')
+    ts = calendar.timegm(ts.utctimetuple())
+    ct = calendar.timegm(datetime.now().utctimetuple())
+    
+    delta = ts-ct
+     
+#end def
+
+calibrate_delta()
+ 
+################################################################################
+# Program modes
+################################################################################
+
+MODE_NONE   = 0
+MODE_SELECT = 1
+MODE_DETAIL = 2
+mode = 0
+
+SELECT_NONE     = 0
+SELECT_STOCK    = 1
+SELECT_HEADER   = 2
+SELECT_TIMEZONE = 3
+select = SELECT_NONE
+header_index = 0
+stock_index = 0
+
+SORT_NONE   = 0
+SORT_UP     = 1
+SORT_DOWN   = 2
+sort_column = 0
+sort_mode   = 0
+
+################################################################################
+# Query strings associated with the various stock attributes
+################################################################################
+
+QUERIES = [ (STOCK_PRICE,     'l1'),
+            (STOCK_RANGE_DAY, 'm' ),
+            (STOCK_52_HIGH,   'k' ),
+            (STOCK_52_LOW,    'j' ),
+            (STOCK_CHANGE_D,  'c1'),
+            (STOCK_MARKET_CAP,'j1'),
+            (STOCK_VOLUME,    'v' ),
+            (STOCK_AVG_VOLUME,'a2') ]
+
+################################################################################
+# Query data formatting routines
+################################################################################
+
+#
+# Append $ to price string, truncate cents to 2 digits
+#
+def format_price(s): 
+    s = "%0.2f"%s
+    s = "$"+s
+    return s
+
+#
+# Append $ to change string, truncate cents to 2 digits
+#
+def format_change(s, percent): 
+    d = "$"
+    if percent: d = "%"
+    s = "%0.2f"%s
+    if s[0] == '-': s = s[0]+d+s[1:]
+    else: s = '+'+d+s
+    return s
+
+#
+# 
+#     
+def format_range(s):
+    # given a range string, format it by including $ signs
+
+    pass
+    
+def format_vol_avg(s):
+    # format volume/average to be human readable (convert 1000000 to 1M, etc)
+    pass
+
+
+################################################################################
+# Main program routines
+################################################################################
+
+stocks = []
+stdata = {}
+
+def choose_stocks ():
+    global stocks
+    stocks += sys.argv[1:]
+
+
+def query_stocks(win):
+    
+    global stocks, stdata
+
+    if len(stocks) == 0: return
+    
+    stocks_string = ""
+    for s in stocks: stocks_string += s+","
+    
+    query_string = ""
+    for q in QUERIES: query_string += q[1]+','
+    
+    #
+    # Do the query and split the output into a list of lines (one per stock)
+    #
+    try:
+        res = yq(stocks_string, query_string).split('\n')
+    except:
+        return
+    #end try
+
+    index = 0
+    for s in res: # for every line containing info about a stock
+        data = s.split(',')[0::2]
+        stock = stocks[index]
+        STOCK = s.split(',')[1][1:-1]
+        
+        if not stock in stdata: stdata[stock] = ['-']*STOCK_ATTR_MAX
+    
+        #
+        # Fill in the non-meta data (some data might need special treatment)
+        #
+        qindex = 0
+        for d in data:
+
+            if d == 'N/A': continue
+
+            qdata = QUERIES[qindex][0]
+            if qdata == STOCK_PRICE:
+               stdata[stock][STOCK_PPRICE] = stdata[stock][qdata]
+               stdata[stock][qdata] = float(d)
+
+            elif qdata == STOCK_CHANGE_D:
+               stdata[stock][qdata] = float(d)
+
+            elif qdata == STOCK_CHANGE_P:
+               stdata[stock][qdata] = float(d)
+
+            elif qdata == STOCK_RANGE_DAY:
+               d = d[1:-1] # chop off the double quotes
+               dash = d.find('-')
+               stdata[stock][qdata] = [float(d[0:dash-1]),float(d[dash+1:])] 
+
+            elif qdata == STOCK_52_HIGH or qdata == STOCK_52_LOW:
+               stdata[stock][qdata] = float(d)
+
+            elif qdata == STOCK_MARKET_CAP:
+
+               stdata[stock][qdata] = "$" + d
+
+               k = d[-1] # (B)illion? (M)illion?
+               v = float(d[0:-1])
+               if k == 'B': k = 1000000000
+               if k == 'M': k = 1000000
+               stdata[stock][STOCK_MARKET_VAL] = v*k
+
+            #end if
+
+            qindex += 1
+        #end for
+        
+        #
+        # Fill in the meta data
+        #
+        stdata[stock][STOCK_SYMBOL] = STOCK
+        
+        index += 1
+        
+    #end for
+    
+#end def
+ 
+#
+# Print the first line containing the time and the market status
+#
+def print_time(win, ch):
+    
+    gmt = time.mktime(datetime.now().utctimetuple())+delta
+    est = gmt - (3600)*4
+    tss = datetime.fromtimestamp(est).strftime('%a %b %d, %Y - %I:%M:%S%p')
+    win.addstr(0,1,tss)
+    tzs = TIMEZONES[timezone][0]
+    
+    if mode == MODE_SELECT and select == SELECT_TIMEZONE:
+       win.addstr(0,len(tss)+2,tzs,curses.A_REVERSE)
+    else:
+       win.addstr(0,len(tss)+2,tzs)
+    #end if
+    
+    isopen = 0
+    
+    win.addstr(0,len(tss)+6, "- US markets ")
+    
+    if isopen:
+       win.addstr(0,len(tss)+19, "open", curses.color_pair(COLOR_GREEN))
+    else:
+       win.addstr(0,len(tss)+19, "closed", curses.color_pair(COLOR_RED))
+    #end if
+#end def
+
+#
+# Print the column headers
+#
+def print_stocks_header(view):
+    x = 1
+    index = 0
+    for h in view:
+        hstr = VIEW_HEADER[h][0]
+        hlen = VIEW_HEADER[h][1]
+        
+        if select == SELECT_HEADER and header_index == index:
+           win.addstr(2,x-1," "+hstr+" ",curses.A_REVERSE)
+        else:
+           win.addstr(2,x,hstr)
+        x += hlen
+        index += 1
+    #end for
+#end def
+
+#
+# Return a list of stocks based on their sorted column values\
+#
+def sorted_stocks():
+    global stocks, stdata
+    
+    if sort_mode == SORT_NONE: return stocks
+    
+
+def print_stocks(win, ch):
+
+    view = views[cview]
+    print_stocks_header(view)
+
+    sstocks = sorted_stocks()
+
+    sindex = 0
+    for stock in sstocks:
+        x = 1
+        y = sindex + 4
+
+        bg = 0
+        if select == SELECT_STOCK and stock_index == sindex: 
+            bg = curses.A_REVERSE
+            w = win.getmaxyx()[1]
+            win.addstr(y, 0, w*" ", bg)
+        #end if
+
+        for h in view:
+            
+            hlen = VIEW_HEADER[h][1]
+            
+            cell = stdata[stock][h]
+            
+            #
+            # Change value is shown in green or red
+            #
+            if h == STOCK_CHANGE_D or h == STOCK_CHANGE_P:
+                if h == STOCK_CHANGE_D: cell = format_change(cell, 0)
+                if h == STOCK_CHANGE_P: cell = format_change(cell, 1)
+
+                if cell[0] == '-':
+                   if not bg:
+                      win.addstr(y, x-1, cell, curses.color_pair(COLOR_RED))
+                   else:
+                      win.addstr(y, x-1, cell, bg)
+                   #end if
+
+                elif cell[0] == '+':
+                   if not bg:
+                      win.addstr(y, x-1, cell, curses.color_pair(COLOR_GREEN))
+                   else:
+                      win.addstr(y, x-1, cell, bg)
+                   #end if
+                #end if
+            elif h == STOCK_PRICE:
+                cell = format_price(cell)
+                win.addstr(y, x, cell, bg)
+            elif h == STOCK_RANGE_DAY:
+                win.addstr(y, x, ("$%0.2f"%cell[0])+" - "+("$%0.2f"%cell[1]),  bg)
+            else:
+                win.addstr(y, x, str(cell), bg)
+            #end if
+            
+            x += hlen
+        #end for
+    
+        sindex += 1
+    #end for
+            
+            
+#end def
+
+#
+# Highlight a given line and return the height of the terminal
+#
+def highlight_line(win, y):
+    b = win.getmaxyx()
+    if y < 0: y = b[0]-1
+    win.addstr(y, 0, " "*(b[1]-1), curses.A_REVERSE)
+    return b[0]-1
+#end def
+
+#
+# Print the bottom line of the program
+#
+def print_footer(win, ch):
+    y = win.getmaxyx()[0]-1
+    if mode == MODE_SELECT and select == SELECT_HEADER:
+       view = views[cview]
+       hdr = view[header_index]
+       hdr = VIEW_HEADER[view[header_index]][0]
+       win.addstr(y,0,"["+hdr+"]")
+    
+       sort_string = "not sorted"
+       win.addstr(y,len(hdr)+3, sort_string)
+       win.addstr(y,30,"[enter] to sort forward")
+    #end if
+#end def
+
+
+def end_cursor(win):
+    bottom = win.getmaxyx()
+    win.move(bottom[0]-1,bottom[1]-1)
+#end def
+
+
+#
+# Choose the largest view that will fit the terminal width
+#
+def choose_view(win):
+    
+    global cview
+    global mode, select
+    global header_index, sort_column, sort_mode
+    
+    changed = 0
+    width = win.getmaxyx()[1]
+    index = len(views)-1
+    for v in reversed(views):
+        w = 0
+        for h in v: w += VIEW_HEADER[h][1]
+        if  w < width: 
+            cview = index;
+            changed = 1
+            break
+        #end if
+        if changed: break
+        index -= 1
+    #end for 
+    
+    #
+    # Reset the select mode/header index etc, if we are shrinking the terminal
+    # and the selected header happens to go out of view
+    #
+    if header_index > len(views[cview])-1 and select == SELECT_HEADER:
+       mode = MODE_NONE
+       select = SELECT_NONE
+       header_index = 0
+       sort_column = 0
+       sort_mode = 0
+    #end if
+#end def
+            
+#
+# Main FSM that drives the program modes based on the key pressed
+#
+def fsm(win, ch):
+    
+    global mode, select
+    global header_index, stock_index
+    
+    if ch == 27: #ESC
+        mode = 0
+        select = 0
+    elif ch == curses.KEY_UP:
+        
+        if mode == MODE_NONE:
+            mode = MODE_SELECT
+            select = SELECT_STOCK
+            stock_index = 0
+        elif mode == MODE_SELECT:
+            if select == SELECT_HEADER:
+                select = SELECT_TIMEZONE
+            elif select == SELECT_STOCK:
+                if stock_index > 0: stock_index -= 1
+                else: 
+                    select = SELECT_HEADER
+                    header_index = 0
+            #end if
+        #end if
+        
+    elif ch == curses.KEY_DOWN:
+        
+        if mode == MODE_NONE:
+            mode = MODE_SELECT
+            select = SELECT_STOCK
+            stock_index = 0
+        elif mode == MODE_SELECT:
+            if select == SELECT_TIMEZONE:
+                select = SELECT_HEADER
+            elif select == SELECT_HEADER:
+                select = SELECT_STOCK
+                stock_index = 0
+            elif select == SELECT_STOCK:
+                if stock_index < len(stocks)-1: stock_index += 1
+            #end if
+        #end if
+        
+    elif ch == curses.KEY_LEFT:
+        view = views[cview]
+        if mode == MODE_SELECT and select == SELECT_HEADER:
+            header_index = (header_index-1)%(len(view))
+        
+    elif ch == curses.KEY_RIGHT:
+        view = views[cview]
+        if mode == MODE_SELECT and select == SELECT_HEADER:
+            header_index = (header_index+1)%(len(view))
+        #end if
+    #end if
+ 
+#end def
+
+#
+# Main update loop
+#
+def update(win, ch, s):
+    
+    win.erase()
+    
+    fsm(win, ch)
+    
+    if ch == curses.KEY_RESIZE: choose_view(win)
+    if s: query_stocks(win)
+    
+    print_time(win, ch)
+    print_stocks(win, ch)
+    print_footer(win, ch)
+    
+    end_cursor(win)
+
+    win.refresh()
+    
+#end def
+
+
+################################################################################
+# Main loop
+################################################################################
+
+ticks = 0
+
+init_curses()
+
+choose_view(win)
+
+choose_stocks()
+
+try:
+  log = open(".crash", "a")
+  while True:
+    if not ticks % 20: update(win, 0, 1) # do a stock update every 2 seconds
+    ch = win.getch()
+    if ch > 0: update(win, ch, 0)
+    time.sleep(0.05)
+    ticks += 1
+  #end while
+except:
+  log.write(traceback.format_exc())
+  log.write('------\n')
+  cleanup(0,0)
+  pass
