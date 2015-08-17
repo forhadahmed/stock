@@ -12,6 +12,6 @@ linux# stock aapl goog yhoo msft csco
 
 ###### Output
 
-![Stock Screenshot](http://forhadahmed.net/github/stock-screenshot.png)
+![Stock Screenshot](http://circuitsoft.net/github/stock-screenshot.png)
 
 *a work in progress...*
