@@ -26,8 +26,6 @@ stock                          # use saved watchlist from ~/.stocks
 
 ## Search Aliases
 
-Common names are automatically translated:
-
 | Search | Symbol |
 |--------|--------|
 | sp500, s&p500, spx | ^GSPC (S&P 500) |
