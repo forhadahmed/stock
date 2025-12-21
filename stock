@@ -15,7 +15,6 @@ import time
 import signal
 import curses
 import calendar
-import traceback
 import json
 import threading
 from datetime import datetime
@@ -1053,7 +1052,6 @@ def main():
         sys.exit(1)
 
     init_curses()
-    log = open(".crash", "a")
 
     load_start_time = time.time()
     threading.Thread(target=fetch_worker, daemon=True).start()
@@ -1070,11 +1068,7 @@ def main():
                 trigger_fetch()
                 last_fetch = time.time()
             update(win)
-    except Exception:
-        log.write(traceback.format_exc())
-        log.write('------\n')
     finally:
-        log.close()
         cleanup(0, 0)
 
 if __name__ == "__main__":
