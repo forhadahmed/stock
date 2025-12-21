@@ -21,22 +21,21 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-# Reduce escape key delay (default 1000ms is too slow)
 os.environ.setdefault('ESCDELAY', '25')
 
-# Settings persistence file
 SETTINGS_FILE = Path.home() / '.stocks'
 CACHE_FILE = Path.home() / '.stocks_cache'
 USER_AGENT = 'Mozilla/5.0'
 
-# Chart cache TTL in seconds per period index
-# 0=1D (no cache), 1=5D, 2=1M, 3=3M, 4=1Y, 5=5Y
-CHART_CACHE_TTL = [0, 300, 300, 600, 3600, 7200]  # 0, 5min, 5min, 10min, 1hr, 2hr
+# Chart cache TTL in seconds per period index (0=1D no cache)
+CHART_CACHE_TTL = [0, 300, 300, 600, 3600, 7200]
 
-# Check if key is an exit/close key (q, Q, or Esc)
-def is_exit_key(ch): return ch == 27 or ch == ord('q') or ch == ord('Q')
+def is_exit_key(ch):
+    return ch == 27 or ch == ord('q') or ch == ord('Q')
 
-# Check if US market is currently open
+def is_enter_key(ch):
+    return ch == 10 or ch == curses.KEY_ENTER
+
 def is_market_open():
     gmt = time.mktime(datetime.now().utctimetuple()) + delta
     est = gmt + 3600 * (-5)
@@ -44,28 +43,24 @@ def is_market_open():
     return (now_et.weekday() < 5
             and ((now_et.hour == 9 and now_et.minute >= 30)
                  or (10 <= now_et.hour < 16)))
-#end
 
-# Check if symbol is already in the watchlist (case-insensitive)
-def in_watchlist(symbol): return symbol.upper() in [s.upper() for s in stocks]
+def in_watchlist(symbol):
+    return symbol.upper() in [s.upper() for s in stocks]
 
-# Create HTTP request with standard User-Agent
 def make_request(url):
     req = Request(url)
     req.add_header('User-Agent', USER_AGENT)
     return req
-#end
 
-# Get color attribute for positive/negative change value
 def get_change_color(value, selected):
-    if selected: return curses.A_REVERSE
+    if selected:
+        return curses.A_REVERSE
     return curses.color_pair(COLOR_GREEN) if value >= 0 else curses.color_pair(COLOR_RED)
-#end
 
-# Load settings from ~/.stocks file
 def load_settings():
     global stocks, visible_columns, sort_column, sort_mode
-    if not SETTINGS_FILE.exists(): return
+    if not SETTINGS_FILE.exists():
+        return
     try:
         with open(SETTINGS_FILE) as f:
             data = json.load(f)
@@ -73,80 +68,78 @@ def load_settings():
             visible_columns = data.get('columns', visible_columns)
             sort_column = data.get('sort_column', 0)
             sort_mode = data.get('sort_mode', 0)
-    except: pass
-#end
+    except Exception:
+        pass
 
-# Save settings to ~/.stocks file
 def save_settings():
     try:
         data = {'stocks': stocks, 'columns': visible_columns,
                 'sort_column': sort_column, 'sort_mode': sort_mode}
-        with open(SETTINGS_FILE, 'w') as f: json.dump(data, f, indent=2)
-    except: pass
-#end
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
-# Chart cache operations
 chart_cache = {}
 
 def load_cache():
     global chart_cache
-    if not CACHE_FILE.exists(): return
+    if not CACHE_FILE.exists():
+        return
     try:
-        with open(CACHE_FILE) as f: chart_cache = json.load(f)
-    except: chart_cache = {}
-#end
+        with open(CACHE_FILE) as f:
+            chart_cache = json.load(f)
+    except Exception:
+        chart_cache = {}
 
 def save_cache():
     try:
-        with open(CACHE_FILE, 'w') as f: json.dump(chart_cache, f)
-    except: pass
-#end
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(chart_cache, f)
+    except Exception:
+        pass
 
 def get_cached_chart(symbol, period_idx):
     key = f"{symbol}:{period_idx}"
-    if key not in chart_cache: return None
+    if key not in chart_cache:
+        return None
     entry = chart_cache[key]
     ttl = CHART_CACHE_TTL[period_idx]
-    if ttl == 0: return None  # no caching for 1D
-    if time.time() - entry.get('ts', 0) > ttl: return None
+    if ttl == 0:
+        return None
+    if time.time() - entry.get('ts', 0) > ttl:
+        return None
     return entry.get('data', [])
-#end
 
 def set_cached_chart(symbol, period_idx, data):
-    if CHART_CACHE_TTL[period_idx] == 0: return  # no caching for 1D
+    if CHART_CACHE_TTL[period_idx] == 0:
+        return
     key = f"{symbol}:{period_idx}"
     chart_cache[key] = {'ts': time.time(), 'data': data}
     save_cache()
-#end
 
 ################################################################################
-# Yahoo Finance JSON API Provider (no dependencies, stdlib only)
+# Yahoo Finance API
 ################################################################################
 
-# Fetch stock data using Yahoo Finance JSON API
 def fetch_stock_data(symbols):
-    if not symbols: return {}
-
+    if not symbols:
+        return {}
     result = {}
     for sym in symbols:
         try:
             url = f'https://query1.finance.yahoo.com/v8/finance/chart/{sym.upper()}?interval=1d&range=1d'
             resp = urlopen(make_request(url), timeout=10)
             data = json.loads(resp.read().decode('utf-8'))
-
             chart = data.get('chart', {}).get('result', [{}])[0]
             meta = chart.get('meta', {})
             indicators = chart.get('indicators', {}).get('quote', [{}])[0]
-
             price = meta.get('regularMarketPrice', 0) or 0
             prev_close = meta.get('chartPreviousClose', price) or price
             change = price - prev_close if price and prev_close else 0
             change_pct = (change / prev_close * 100) if prev_close else 0
-
-            # Get open from indicators (last value)
             open_prices = indicators.get('open', [])
             open_price = open_prices[-1] if open_prices and open_prices[-1] else prev_close
-
             result[sym] = {
                 'symbol': sym.upper(),
                 'name': meta.get('shortName', sym.upper()),
@@ -161,12 +154,9 @@ def fetch_stock_data(symbols):
                 'week52_low': meta.get('fiftyTwoWeekLow', 0) or 0,
                 'week52_high': meta.get('fiftyTwoWeekHigh', 0) or 0,
             }
-        except:
+        except Exception:
             result[sym] = None
-        #end
-    #end
     return result
-#end
 
 ################################################################################
 # Global state
@@ -184,23 +174,19 @@ stock_index = 0
 sort_column = 0
 sort_mode = 0  # 0=none, 1=asc, 2=desc
 
-# Input mode
 INPUT_NONE = 0
 INPUT_SEARCH = 1
 INPUT_DELETE_CONFIRM = 2
 input_mode = INPUT_NONE
 input_buffer = ""
 
-# Search results (from Yahoo search API)
-search_results = []  # list of {'symbol': ..., 'name': ..., 'exchange': ...}
-search_index = 0     # selected result index
+search_results = []
+search_index = 0
 
-# Sort constants
 SORT_NONE = 0
 SORT_UP = 1
 SORT_DOWN = 2
 
-# Column definitions: (key, header, width)
 ALL_COLUMNS = [
     ('symbol',      'Symbol',    12),
     ('price',       'Price',     12),
@@ -215,26 +201,21 @@ ALL_COLUMNS = [
     ('week52_high', '52W Hi',    12),
 ]
 
-# Default visible columns (by key)
 visible_columns = ['symbol', 'price', 'change', 'change_pct', 'volume']
 
-# Settings mode
 settings_mode = False
 settings_index = 0
 
-# Chart mode
 chart_mode = False
 chart_symbol = ""
 chart_data = []
-chart_period = 0  # index into CHART_PERIODS
-chart_cursor = -1  # -1 = no cursor, 0+ = index into chart_data
+chart_period = 0
+chart_cursor = -1
 
-# Initial loading state
 initial_load = True
 load_start_time = 0
 SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-# Available chart periods: (range, interval, label)
 CHART_PERIODS = [
     ('1d', '5m', '1D'),
     ('5d', '15m', '5D'),
@@ -247,60 +228,59 @@ CHART_PERIODS = [
 delta = 0
 
 ################################################################################
-# SIGINT handler
+# Curses / Signal handling
 ################################################################################
 
 def cleanup(sig, fr):
     global win
     if win:
-        try: win.keypad(0); curses.nocbreak(); curses.echo(); curses.endwin()
-        except: pass
+        try:
+            win.keypad(0)
+            curses.nocbreak()
+            curses.echo()
+            curses.endwin()
+        except Exception:
+            pass
     print("[quit]")
     sys.exit()
-#end
 
 signal.signal(signal.SIGINT, cleanup)
-
-################################################################################
-# Curses initialization
-################################################################################
 
 def init_curses():
     global win, COLOR_RED, COLOR_GREEN, COLOR_CYAN
     win = curses.initscr()
     curses.noecho()
-    curses.halfdelay(1)  # wait up to 0.1s for input, then return -1
+    curses.halfdelay(1)
     win.keypad(1)
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_RED, -1)
     curses.init_pair(2, curses.COLOR_GREEN, -1)
     curses.init_pair(3, curses.COLOR_CYAN, -1)
-    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_WHITE)
     COLOR_RED, COLOR_GREEN, COLOR_CYAN = 1, 2, 3
-    try: curses.curs_set(0)
-    except: pass
-#end
-
-################################################################################
-# Time calibration
-################################################################################
+    try:
+        curses.curs_set(0)
+    except Exception:
+        pass
 
 def calibrate_delta():
     global delta
     try:
         resp = urlopen('http://www.google.com', timeout=5)
         tm = resp.headers.get('date', '')
-        if not tm: return
+        if not tm:
+            return
         ts_str = tm.strip()
-        if ts_str.endswith('GMT'): ts_str = ts_str[:-3].strip()
-        if ',' in ts_str: ts_str = ts_str.split(',', 1)[1].strip()
+        if ts_str.endswith('GMT'):
+            ts_str = ts_str[:-3].strip()
+        if ',' in ts_str:
+            ts_str = ts_str.split(',', 1)[1].strip()
         ts = datetime.strptime(ts_str, '%d %b %Y %H:%M:%S')
         ts = calendar.timegm(ts.utctimetuple())
         ct = calendar.timegm(datetime.now().utctimetuple())
         delta = ts - ct
-    except: delta = 0
-#end
+    except Exception:
+        delta = 0
 
 ################################################################################
 # Data functions
@@ -314,21 +294,20 @@ def add_stock(symbol):
         save_settings()
         return True
     return False
-#end
 
 def remove_stock(index):
-    global stocks, stock_index, scroll_offset
+    global stocks, stock_index
     if 0 <= index < len(stocks):
         sym = stocks[index]
         stocks.pop(index)
-        if sym in stdata: del stdata[sym]
-        if stock_index >= len(stocks): stock_index = max(0, len(stocks) - 1)
+        if sym in stdata:
+            del stdata[sym]
+        if stock_index >= len(stocks):
+            stock_index = max(0, len(stocks) - 1)
         save_settings()
         return True
     return False
-#end
 
-# Common search aliases for indices
 SEARCH_ALIASES = {
     'sp500': '^GSPC', 's&p500': '^GSPC', 's&p': '^GSPC', 'spx': '^GSPC',
     'dow': '^DJI', 'djia': '^DJI', 'dowjones': '^DJI',
@@ -340,10 +319,9 @@ SEARCH_ALIASES = {
     'eur': 'EURUSD=X', 'eurusd': 'EURUSD=X', 'gbp': 'GBPUSD=X', 'usdjpy': 'JPY=X',
 }
 
-# Search Yahoo Finance for stocks matching prefix
 def search_stocks(query):
-    if not query: return []
-    # Check for alias
+    if not query:
+        return []
     q_lower = query.strip().lower().replace(' ', '')
     if q_lower in SEARCH_ALIASES:
         query = SEARCH_ALIASES[q_lower]
@@ -362,35 +340,38 @@ def search_stocks(query):
                     'type': qtype,
                 })
         return results
-    except: return []
-#end
+    except Exception:
+        return []
+
+def get_visible_columns():
+    return [(k, h, w) for k, h, w in ALL_COLUMNS if k in visible_columns]
 
 def get_sorted_stocks():
-    if sort_mode == SORT_NONE: return stocks
+    if sort_mode == SORT_NONE:
+        return stocks
     cols = get_visible_columns()
-    if sort_column >= len(cols): return stocks
+    if sort_column >= len(cols):
+        return stocks
     sort_key = cols[sort_column][0]
 
     def get_key(sym):
-        if sort_key == 'symbol': return sym
+        if sort_key == 'symbol':
+            return sym
         info = stdata.get(sym)
-        if not info: return 0
+        if not info:
+            return 0
         return info.get(sort_key, 0)
-    #end
 
     return sorted(stocks, key=get_key, reverse=(sort_mode == SORT_DOWN))
-#end
 
 ################################################################################
-# Intraday chart (braille rendering)
+# Chart data and rendering
 ################################################################################
 
-# Fetch chart data from Yahoo Finance (with caching)
 def fetch_chart_data(symbol, period_idx=0):
-    # Check cache first
     cached = get_cached_chart(symbol, period_idx)
-    if cached: return cached
-
+    if cached:
+        return cached
     try:
         rng, interval, _ = CHART_PERIODS[period_idx]
         url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}'
@@ -401,63 +382,59 @@ def fetch_chart_data(symbol, period_idx=0):
         quotes = chart.get('indicators', {}).get('quote', [{}])[0]
         closes = quotes.get('close', [])
         prices = [(t, p) for t, p in zip(timestamps, closes) if p is not None]
-        # Cache the result
         set_cached_chart(symbol, period_idx, prices)
         return prices
-    except:
+    except Exception:
         return []
-#end
 
-# Braille dot positions in 2x4 grid per character
-# Left column: dots 1,2,3,7 (bits 0,1,2,6)
-# Right column: dots 4,5,6,8 (bits 3,4,5,7)
+def start_chart_fetch(symbol, period_idx):
+    """Start async fetch of chart data."""
+    def fetch():
+        global chart_data
+        chart_data = fetch_chart_data(symbol, period_idx)
+    threading.Thread(target=fetch, daemon=True).start()
+
 BRAILLE_BASE = 0x2800
 BRAILLE_DOTS = [
-    [0x01, 0x02, 0x04, 0x40],  # left column (x=0): rows 0,1,2,3
-    [0x08, 0x10, 0x20, 0x80],  # right column (x=1): rows 0,1,2,3
+    [0x01, 0x02, 0x04, 0x40],
+    [0x08, 0x10, 0x20, 0x80],
 ]
 
-# Set a dot in the braille grid
 def set_braille_dot(grid, width, height, gx, gy):
     char_x, char_y = gx // 2, gy // 4
     if 0 <= char_x < width and 0 <= char_y < height:
         grid[char_y][char_x] |= BRAILLE_DOTS[gx % 2][gy % 4]
-#end
 
-# Draw line between two points using Bresenham's algorithm
 def draw_braille_line(grid, width, height, x0, y0, x1, y1):
     dx, dy = abs(x1 - x0), abs(y1 - y0)
     sx = 1 if x0 < x1 else -1
     sy = 1 if y0 < y1 else -1
     err = dx - dy
-
     while True:
         set_braille_dot(grid, width, height, x0, y0)
-        if x0 == x1 and y0 == y1: break
+        if x0 == x1 and y0 == y1:
+            break
         e2 = 2 * err
-        if e2 > -dy: err -= dy; x0 += sx
-        if e2 < dx: err += dx; y0 += sy
-#end
+        if e2 > -dy:
+            err -= dy
+            x0 += sx
+        if e2 < dx:
+            err += dx
+            y0 += sy
 
-# Render braille line chart
 def render_braille_chart(prices, width, height):
-    if not prices or width < 1 or height < 1: return [], 0, 0
-
+    if not prices or width < 1 or height < 1:
+        return [], 0, 0
     vals = [p for _, p in prices]
     pmin, pmax = min(vals), max(vals)
     prange = pmax - pmin if pmax > pmin else 1
-
-    # Braille grid: each char is 2 dots wide, 4 dots tall
     grid_w = width * 2
     grid_h = height * 4
-
-    # Cap height so aspect ratio isn't taller than wide
-    if grid_h > grid_w: grid_h = grid_w; height = max(1, grid_h // 4)
-
+    if grid_h > grid_w:
+        grid_h = grid_w
+        height = max(1, grid_h // 4)
     grid = [[0] * width for _ in range(height)]
-    grid_h = height * 4  # recalculate after height adjustment
-
-    # Map prices to grid coordinates
+    grid_h = height * 4
     n = len(vals)
     points = []
     for i, price in enumerate(vals):
@@ -465,23 +442,27 @@ def render_braille_chart(prices, width, height):
         gy = int((pmax - price) / prange * (grid_h - 1)) if prange > 0 else grid_h // 2
         gy = max(0, min(grid_h - 1, gy))
         points.append((gx, gy))
-
-    # Draw lines between consecutive points
     for i in range(len(points) - 1):
         x0, y0 = points[i]
         x1, y1 = points[i + 1]
         draw_braille_line(grid, width, height, x0, y0, x1, y1)
-
     rows = [''.join(chr(BRAILLE_BASE + cell) for cell in row) for row in grid]
     return rows, pmin, pmax
-#end
 
-# Calculate price levels for horizontal grid lines
 def get_price_levels(pmin, pmax, num_lines):
-    if pmax <= pmin: return [pmin]
+    if pmax <= pmin:
+        return [pmin]
     step = (pmax - pmin) / (num_lines + 1)
     return [pmin + step * (i + 1) for i in range(num_lines)]
-#end
+
+def format_chart_time(ts, period_idx):
+    dt = datetime.fromtimestamp(ts)
+    if period_idx <= 1:
+        return dt.strftime('%H:%M')
+    elif period_idx <= 3:
+        return dt.strftime('%b %d')
+    else:
+        return dt.strftime('%b %y')
 
 ################################################################################
 # Display functions
@@ -492,19 +473,17 @@ def print_header(win):
     gmt = time.mktime(datetime.now().utctimetuple()) + delta
     est = gmt + 3600 * (-5)
     tss = datetime.fromtimestamp(est).strftime('%a %b %d, %Y - %I:%M:%S%p')
-
     try:
-        win.addstr(0, 1, tss + " EST")
+        win.addstr(0, 1, f"{tss} EST")
         win.addstr(0, len(tss) + 6, "- US markets ")
-        if is_market_open(): win.addstr("open", curses.color_pair(COLOR_GREEN))
-        else: win.addstr("closed", curses.color_pair(COLOR_RED))
+        if is_market_open():
+            win.addstr("open", curses.color_pair(COLOR_GREEN))
+        else:
+            win.addstr("closed", curses.color_pair(COLOR_RED))
         count_str = f"  [{len(stocks)} stocks]"
         win.addstr(0, w - len(count_str) - 1, count_str)
-    except curses.error: pass
-#end
-
-# Get list of (key, header, width) for visible columns
-def get_visible_columns(): return [(k, h, w) for k, h, w in ALL_COLUMNS if k in visible_columns]
+    except curses.error:
+        pass
 
 def print_columns(win):
     try:
@@ -517,37 +496,31 @@ def print_columns(win):
             win.addstr(y, x, header.ljust(width - 1), curses.A_BOLD)
             x += width
         win.addstr(y + 1, 1, "─" * (w - 2), curses.A_DIM)
-    except curses.error: pass
-#end
+    except curses.error:
+        pass
 
-# Display search results panel
 def print_search_results(win):
-    if not search_results: return
+    if not search_results:
+        return
     h, w = win.getmaxyx()
     start_y = 4
     max_rows = min(len(search_results), h - 7)
-
     try:
-        # Header
         win.addstr(start_y, 1, f"Search Results ({len(search_results)} found)", curses.A_BOLD)
         win.addstr(start_y + 1, 1, "Symbol     Name                         Price       Change", curses.A_DIM)
-
-        # Results list
         for i in range(max_rows):
             y = start_y + 2 + i
-            if y >= h - 2: break
-
+            if y >= h - 2:
+                break
             result = search_results[i]
             sym = result.get('symbol', '')[:10]
             name = result.get('name', '')[:25]
             data = result.get('data')
             selected = (i == search_index)
-
-            # Check if already in watchlist
             in_list = in_watchlist(sym)
-
             try:
-                if selected: win.addstr(y, 1, " " * (w - 2), curses.A_REVERSE)
+                if selected:
+                    win.addstr(y, 1, " " * (w - 2), curses.A_REVERSE)
                 attr = curses.A_REVERSE if selected else 0
                 win.addstr(y, 2, sym.ljust(10), attr | curses.A_BOLD)
                 win.addstr(y, 13, name.ljust(26), attr)
@@ -559,108 +532,73 @@ def print_search_results(win):
                     win.addstr(y, 52, chg_str.ljust(10), get_change_color(change, selected) | attr)
                 else:
                     win.addstr(y, 40, "N/A".ljust(12), attr | curses.A_DIM)
-                if in_list: win.addstr(y, 65, "(added)", attr | curses.A_DIM)
-            except curses.error: pass
-    except curses.error: pass
-#end
+                if in_list:
+                    win.addstr(y, 65, "(added)", attr | curses.A_DIM)
+            except curses.error:
+                pass
+    except curses.error:
+        pass
 
-# Display settings panel for column configuration
 def print_settings(win):
     global settings_index
     h, w = win.getmaxyx()
     start_y = 4
-
     try:
         win.addstr(start_y, 1, "Column Settings", curses.A_BOLD)
         win.addstr(start_y, 20, "[Up/Down] select  [Space] toggle  [Esc] close", curses.A_DIM)
-
         for i, (key, header, width) in enumerate(ALL_COLUMNS):
             y = start_y + 2 + i
-            if y >= h - 2: break
+            if y >= h - 2:
+                break
             selected = (i == settings_index)
             enabled = key in visible_columns
             is_symbol = (key == 'symbol')
-
             try:
-                if selected: win.addstr(y, 1, " " * (w - 2), curses.A_REVERSE)
+                if selected:
+                    win.addstr(y, 1, " " * (w - 2), curses.A_REVERSE)
                 attr = curses.A_REVERSE if selected else 0
                 check = "[*]" if is_symbol else ("[x]" if enabled else "[ ]")
                 win.addstr(y, 2, check, attr)
                 win.addstr(y, 6, header.ljust(12), attr | curses.A_BOLD)
                 win.addstr(y, 19, f"(width: {width})", attr | curses.A_DIM)
-            except curses.error: pass
-    except curses.error: pass
-#end
+            except curses.error:
+                pass
+    except curses.error:
+        pass
 
-# Format timestamp based on period
-def format_chart_time(ts, period_idx):
-    dt = datetime.fromtimestamp(ts)
-    if period_idx <= 1: return dt.strftime('%H:%M')  # 1D, 5D: show time
-    elif period_idx <= 3: return dt.strftime('%b %d')  # 1M, 3M: show date
-    else: return dt.strftime('%b %y')  # 1Y, 5Y: show month/year
-#end
-
-# Display intraday chart overlay
-def print_chart(win):
-    global chart_data
-    h, w = win.getmaxyx()
-
-    if not chart_data:
-        try: win.addstr(h // 2, w // 2 - 5, "Loading...", curses.A_DIM)
-        except curses.error: pass
-        return
-
-    # Layout: header row, chart area, time axis + labels, footer
-    chart_w = w - 14  # leave room for price labels on left
-    chart_h = h - 5   # header + time axis + labels + footer
-    chart_x = 12
-    chart_y = 1
-
-    # Get stock info for header
-    info = stdata.get(chart_symbol, {})
+def print_chart_header(win, w, info, change):
     price = info.get('price', 0) if info else 0
-    change = info.get('change', 0) if info else 0
     chg_pct = info.get('change_pct', 0) if info else 0
+    chg_str = f"+${change:.2f}" if change >= 0 else f"-${abs(change):.2f}"
+    pct_str = f"+{chg_pct:.2f}%" if chg_pct >= 0 else f"{chg_pct:.2f}%"
+    header = f"{chart_symbol} ${price:.2f} ({chg_str}, {pct_str})"
+    win.addstr(0, 1, header, curses.A_BOLD)
 
-    # Header with cursor info and period selector
-    try:
-        chg_str = f"+${change:.2f}" if change >= 0 else f"-${abs(change):.2f}"
-        pct_str = f"+{chg_pct:.2f}%" if chg_pct >= 0 else f"{chg_pct:.2f}%"
-        header = f"{chart_symbol} ${price:.2f} ({chg_str}, {pct_str})"
-        win.addstr(0, 1, header, curses.A_BOLD)
+    n = len(chart_data)
+    if chart_cursor >= 0 and chart_cursor < n:
+        ts, cursor_price = chart_data[chart_cursor]
+        dt = datetime.fromtimestamp(ts)
+        if chart_period <= 1:
+            cursor_time = dt.strftime('%H:%M ET')
+        elif chart_period <= 3:
+            cursor_time = dt.strftime('%b %d %H:%M')
+        else:
+            cursor_time = dt.strftime('%b %d, %Y')
+        cursor_info = f" | {cursor_time}  ${cursor_price:.2f}"
+        win.addstr(0, len(header) + 2, cursor_info, curses.A_DIM)
 
-        # Cursor info after header
-        n = len(chart_data)
-        if chart_cursor >= 0 and chart_cursor < n:
-            ts, cursor_price = chart_data[chart_cursor]
-            dt = datetime.fromtimestamp(ts)
-            if chart_period <= 1:
-                cursor_time = dt.strftime('%H:%M ET')
-            elif chart_period <= 3:
-                cursor_time = dt.strftime('%b %d %H:%M')
-            else:
-                cursor_time = dt.strftime('%b %d, %Y')
-            cursor_info = f" | {cursor_time}  ${cursor_price:.2f}"
-            win.addstr(0, len(header) + 2, cursor_info, curses.A_DIM)
+    x = w - sum(len(p[2]) + 2 for p in CHART_PERIODS)
+    for i, p in enumerate(CHART_PERIODS):
+        attr = curses.A_BOLD if i == chart_period else curses.A_DIM
+        win.addstr(0, x, p[2], attr)
+        x += len(p[2]) + 2
 
-        # Period selector on right
-        x = w - sum(len(p[2]) + 2 for p in CHART_PERIODS)
-        for i, p in enumerate(CHART_PERIODS):
-            attr = curses.A_BOLD if i == chart_period else curses.A_DIM
-            win.addstr(0, x, p[2], attr)
-            x += len(p[2]) + 2
-    except curses.error: pass
-
-    # Render chart
-    rows, pmin, pmax = render_braille_chart(chart_data, chart_w, chart_h)
-    if not rows: return
-
-    # Calculate cursor x position on chart
+def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, chart_w):
+    n = len(chart_data)
     cursor_chart_x = -1
     if chart_cursor >= 0 and n > 1:
         cursor_chart_x = int(chart_cursor * (chart_w - 1) / (n - 1))
 
-    # Calculate price level positions for dim horizontal lines (3 lines)
     levels = get_price_levels(pmin, pmax, 3)
     prange = pmax - pmin if pmax > pmin else 1
     level_rows = set()
@@ -668,49 +606,38 @@ def print_chart(win):
         row_y = int((pmax - lvl) / prange * (len(rows) - 1)) if prange > 0 else 0
         level_rows.add(row_y)
 
-    # Draw chart rows with price labels and dim grid lines
     for i, row in enumerate(rows):
         y = chart_y + i
-        if y >= h - 2: break
-
-        # Price label on left (show at top, middle levels, and bottom)
+        if y >= h - 2:
+            break
         if i == 0:
             label = f"${pmax:.2f}"
         elif i == len(rows) - 1:
             label = f"${pmin:.2f}"
         elif i in level_rows:
-            # Find which level this row corresponds to
+            label = ""
             for lvl in levels:
                 row_y = int((pmax - lvl) / prange * (len(rows) - 1))
                 if row_y == i:
                     label = f"${lvl:.2f}"
                     break
-            else:
-                label = ""
         else:
             label = ""
 
         try:
-            # Draw price label
             win.addstr(y, 1, label.rjust(10), curses.A_DIM)
-
-            # Draw horizontal grid line if this is a level row
             if i in level_rows:
-                grid_line = "┄" * chart_w
-                win.addstr(y, chart_x, grid_line, curses.A_DIM)
-
-            # Draw braille chart on top (overwrites grid where line exists)
+                win.addstr(y, chart_x, "┄" * chart_w, curses.A_DIM)
             for cx, ch in enumerate(row):
-                if ch != chr(BRAILLE_BASE):  # not empty braille
+                if ch != chr(BRAILLE_BASE):
                     color = curses.color_pair(COLOR_GREEN) if change >= 0 else curses.color_pair(COLOR_RED)
                     win.addstr(y, chart_x + cx, ch, color)
-
-            # Draw vertical cursor line
             if cursor_chart_x >= 0:
                 win.addstr(y, chart_x + cursor_chart_x, "│", curses.A_DIM)
-        except curses.error: pass
+        except curses.error:
+            pass
 
-    # Draw live marker at end of chart if market open and 1D view
+    # Live marker
     if is_market_open() and chart_period == 0 and chart_data:
         try:
             vals = [p for _, p in chart_data]
@@ -722,17 +649,16 @@ def print_chart(win):
             if 0 <= marker_row < len(rows) and marker_y < h - 2:
                 color = curses.color_pair(COLOR_GREEN) if change >= 0 else curses.color_pair(COLOR_RED)
                 win.addstr(marker_y, marker_x, "●", color | curses.A_BOLD)
-        except curses.error: pass
+        except curses.error:
+            pass
 
-    # Draw time axis with tick marks
+def print_chart_axis(win, h, w, chart_x, chart_y, chart_w, num_rows):
     try:
-        time_y = chart_y + len(rows)
+        time_y = chart_y + num_rows
         if time_y < h - 1 and chart_data:
             timestamps = [t for t, _ in chart_data]
             n = len(timestamps)
             num_labels = min(5, chart_w // 10)
-
-            # Draw axis line with ticks
             axis_line = list("─" * chart_w)
             tick_positions = []
             for i in range(num_labels):
@@ -742,11 +668,12 @@ def print_chart(win):
                     tick_positions.append((i, screen_x))
             win.addstr(time_y, chart_x, "".join(axis_line), curses.A_DIM)
 
-            # Draw cursor tick if active
+            cursor_chart_x = -1
+            if chart_cursor >= 0 and n > 1:
+                cursor_chart_x = int(chart_cursor * (chart_w - 1) / (n - 1))
             if cursor_chart_x >= 0 and 0 <= cursor_chart_x < chart_w:
                 win.addstr(time_y, chart_x + cursor_chart_x, "┼", curses.A_DIM)
 
-            # Draw time labels below ticks
             if time_y + 1 < h - 1:
                 for i, screen_x in tick_positions:
                     data_idx = int(i * (n - 1) / (num_labels - 1)) if num_labels > 1 else 0
@@ -755,8 +682,37 @@ def print_chart(win):
                     x = chart_x + screen_x - len(label) // 2
                     if x >= chart_x and x + len(label) < w:
                         win.addstr(time_y + 1, x, label, curses.A_DIM)
-    except curses.error: pass
-#end
+    except curses.error:
+        pass
+
+def print_chart(win):
+    h, w = win.getmaxyx()
+    if not chart_data:
+        try:
+            win.addstr(h // 2, w // 2 - 5, "Loading...", curses.A_DIM)
+        except curses.error:
+            pass
+        return
+
+    chart_w = w - 14
+    chart_h = h - 5
+    chart_x = 12
+    chart_y = 1
+
+    info = stdata.get(chart_symbol, {})
+    change = info.get('change', 0) if info else 0
+
+    try:
+        print_chart_header(win, w, info, change)
+    except curses.error:
+        pass
+
+    rows, pmin, pmax = render_braille_chart(chart_data, chart_w, chart_h)
+    if not rows:
+        return
+
+    print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, chart_w)
+    print_chart_axis(win, h, w, chart_x, chart_y, chart_w, len(rows))
 
 def print_stocks(win):
     global scroll_offset
@@ -764,11 +720,16 @@ def print_stocks(win):
     visible_rows = h - 5
     start_y = 4
 
-    if chart_mode: print_chart(win); return
-    if settings_mode: print_settings(win); return
-    if search_results: print_search_results(win); return
+    if chart_mode:
+        print_chart(win)
+        return
+    if settings_mode:
+        print_settings(win)
+        return
+    if search_results:
+        print_search_results(win)
+        return
 
-    # Show loading during initial fetch
     if initial_load:
         try:
             elapsed = time.time() - load_start_time
@@ -778,73 +739,77 @@ def print_stocks(win):
             else:
                 spin = SPINNER[int(elapsed * 10) % len(SPINNER)]
                 win.addstr(start_y, 1, f"{spin} Loading...", curses.A_DIM)
-        except curses.error: pass
+        except curses.error:
+            pass
         return
 
     sstocks = get_sorted_stocks()
     total = len(sstocks)
 
-    # Adjust scroll
-    if stock_index < scroll_offset: scroll_offset = stock_index
-    elif stock_index >= scroll_offset + visible_rows: scroll_offset = stock_index - visible_rows + 1
+    if stock_index < scroll_offset:
+        scroll_offset = stock_index
+    elif stock_index >= scroll_offset + visible_rows:
+        scroll_offset = stock_index - visible_rows + 1
     scroll_offset = max(0, min(scroll_offset, max(0, total - visible_rows)))
 
     for i in range(visible_rows):
         idx = scroll_offset + i
         y = start_y + i
-        if y >= h - 2: break
-        if idx >= total: continue
-
+        if y >= h - 2:
+            break
+        if idx >= total:
+            continue
         sym = sstocks[idx]
         info = stdata.get(sym)
         selected = (idx == stock_index)
-
         try:
-            if selected: win.addstr(y, 0, " " * (w - 1), curses.A_REVERSE)
+            if selected:
+                win.addstr(y, 0, " " * (w - 1), curses.A_REVERSE)
             x = 1
             attr = curses.A_REVERSE if selected else 0
             cols = get_visible_columns()
-
             for key, header, width in cols:
                 val_str = ""
                 color = attr
-
                 if key == 'symbol':
                     val_str = sym[:width-1]
                 elif info:
                     val = info.get(key, 0)
                     if key in ('price', 'day_low', 'day_high', 'open',
                                'prev_close', 'week52_low', 'week52_high'):
-                        val_str = "$%.2f" % val
+                        val_str = f"${val:.2f}"
                     elif key == 'change':
-                        val_str = "+$%.2f" % val if val >= 0 else "-$%.2f" % abs(val)
+                        val_str = f"+${val:.2f}" if val >= 0 else f"-${abs(val):.2f}"
                         color = get_change_color(val, selected)
                     elif key == 'change_pct':
-                        val_str = "+%.2f%%" % val if val >= 0 else "%.2f%%" % val
+                        val_str = f"+{val:.2f}%" if val >= 0 else f"{val:.2f}%"
                         color = get_change_color(val, selected)
                     elif key == 'volume':
-                        if val >= 1e9: val_str = "%.2fB" % (val / 1e9)
-                        elif val >= 1e6: val_str = "%.2fM" % (val / 1e6)
-                        elif val >= 1e3: val_str = "%.1fK" % (val / 1e3)
-                        else: val_str = str(int(val))
+                        if val >= 1e9:
+                            val_str = f"{val / 1e9:.2f}B"
+                        elif val >= 1e6:
+                            val_str = f"{val / 1e6:.2f}M"
+                        elif val >= 1e3:
+                            val_str = f"{val / 1e3:.1f}K"
+                        else:
+                            val_str = str(int(val))
                 else:
                     val_str = "-"
-
                 win.addstr(y, x, val_str.ljust(width - 1), color | attr)
                 x += width
-        except curses.error: pass
+        except curses.error:
+            pass
 
     if total > visible_rows:
         try:
             indicator = f" [{scroll_offset + 1}-{min(scroll_offset + visible_rows, total)}/{total}]"
             win.addstr(h - 2, w - len(indicator) - 1, indicator, curses.color_pair(COLOR_CYAN))
-        except curses.error: pass
-#end
+        except curses.error:
+            pass
 
 def print_menu(win):
     h, w = win.getmaxyx()
     y = h - 1
-
     try:
         win.addstr(y, 0, " " * (w - 1))
         if input_mode == INPUT_DELETE_CONFIRM:
@@ -852,7 +817,7 @@ def print_menu(win):
             sym = sstocks[stock_index] if 0 <= stock_index < len(sstocks) else "?"
             win.addstr(y, 1, f"delete {sym}? [Y/n] ", curses.A_BOLD)
         elif input_mode == INPUT_SEARCH:
-            win.addstr(y, 1, "search: " + input_buffer + "_", curses.A_BOLD)
+            win.addstr(y, 1, f"search: {input_buffer}_", curses.A_BOLD)
         elif chart_mode:
             win.addstr(y, 1, "[up/down] stock  [tab] period  [q] close", curses.color_pair(COLOR_CYAN))
         elif settings_mode:
@@ -861,181 +826,210 @@ def print_menu(win):
             win.addstr(y, 1, "[up/down] select  [enter] add  [q] close", curses.color_pair(COLOR_CYAN))
         else:
             win.addstr(y, 1, "[a]dd [d]el [enter] chart [tab/s] sort [c]ols [q]uit", curses.color_pair(COLOR_CYAN))
-    except curses.error: pass
-#end
+    except curses.error:
+        pass
 
 ################################################################################
 # Input handling
 ################################################################################
 
-def handle_input(ch):
+def handle_chart_input(ch):
+    global chart_mode, chart_data, chart_cursor, chart_period, chart_symbol, stock_index
+    sstocks = get_sorted_stocks()
+    total = len(sstocks)
+
+    if is_exit_key(ch):
+        chart_mode = False
+        chart_data = []
+        chart_cursor = -1
+    elif ch == 9:  # Tab
+        chart_period = (chart_period + 1) % len(CHART_PERIODS)
+        chart_cursor = -1
+        start_chart_fetch(chart_symbol, chart_period)
+    elif ch == curses.KEY_UP and stock_index > 0:
+        stock_index -= 1
+        chart_symbol = sstocks[stock_index]
+        start_chart_fetch(chart_symbol, chart_period)
+    elif ch == curses.KEY_DOWN and stock_index < total - 1:
+        stock_index += 1
+        chart_symbol = sstocks[stock_index]
+        start_chart_fetch(chart_symbol, chart_period)
+    elif ch == curses.KEY_RIGHT and chart_data:
+        chart_cursor = (chart_cursor + 1) % len(chart_data)
+    elif ch == curses.KEY_LEFT and chart_data:
+        chart_cursor = (chart_cursor - 1) % len(chart_data)
+
+def handle_input_mode(ch):
     global input_mode, input_buffer, search_results, search_index
-    global stock_index, scroll_offset, sort_column, sort_mode, stocks
+    if is_exit_key(ch):
+        input_mode = INPUT_NONE
+        input_buffer = ""
+    elif input_mode == INPUT_DELETE_CONFIRM:
+        if ch == ord('y') or ch == ord('Y') or is_enter_key(ch):
+            sstocks = get_sorted_stocks()
+            if sstocks and 0 <= stock_index < len(sstocks):
+                sym = sstocks[stock_index]
+                idx = stocks.index(sym) if sym in stocks else -1
+                if idx >= 0:
+                    remove_stock(idx)
+        input_mode = INPUT_NONE
+        input_buffer = ""
+    elif is_enter_key(ch):
+        if input_mode == INPUT_SEARCH and input_buffer:
+            words = input_buffer.strip().split()
+            if len(words) > 1:
+                added = sum(1 for word in words if add_stock(word))
+                if added > 0:
+                    trigger_fetch()
+            else:
+                search_results = search_stocks(input_buffer.strip())
+                search_index = 0
+                if search_results:
+                    symbols = [r['symbol'] for r in search_results]
+                    prices = fetch_stock_data(symbols)
+                    for r in search_results:
+                        r['data'] = prices.get(r['symbol'])
+        input_mode = INPUT_NONE
+        input_buffer = ""
+    elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:
+        input_buffer = input_buffer[:-1]
+    elif 32 <= ch <= 126:
+        input_buffer += chr(ch)
+
+def handle_settings_input(ch):
     global settings_mode, settings_index, visible_columns
-    global chart_mode, chart_symbol, chart_data, chart_period, chart_cursor
+    if is_exit_key(ch):
+        settings_mode = False
+    elif ch == curses.KEY_UP and settings_index > 0:
+        settings_index -= 1
+    elif ch == curses.KEY_DOWN and settings_index < len(ALL_COLUMNS) - 1:
+        settings_index += 1
+    elif ch == ord(' '):
+        key = ALL_COLUMNS[settings_index][0]
+        if key != 'symbol':
+            if key in visible_columns:
+                visible_columns.remove(key)
+            else:
+                visible_columns.append(key)
+            save_settings()
+
+def handle_search_results_input(ch):
+    global search_results, search_index
+    if is_exit_key(ch):
+        search_results = []
+        search_index = 0
+    elif ch == curses.KEY_UP and search_index > 0:
+        search_index -= 1
+    elif ch == curses.KEY_DOWN and search_index < len(search_results) - 1:
+        search_index += 1
+    elif is_enter_key(ch):
+        if 0 <= search_index < len(search_results):
+            sym = search_results[search_index].get('symbol', '')
+            if sym and not in_watchlist(sym):
+                add_stock(sym)
+                trigger_fetch()
+
+def handle_normal_input(ch):
+    global input_mode, input_buffer, stock_index, scroll_offset
+    global sort_column, sort_mode, settings_mode, settings_index
+    global chart_mode, chart_symbol, chart_data
 
     sstocks = get_sorted_stocks()
     total = len(sstocks)
 
-    # Chart mode
-    if chart_mode:
-        if is_exit_key(ch):
-            chart_mode = False; chart_data = []; chart_cursor = -1
-        elif ch == 9:  # Tab - cycle period
-            chart_period = (chart_period + 1) % len(CHART_PERIODS)
-            chart_cursor = -1
-            idx = chart_period
-            sym = chart_symbol
-            def fetch():
-                global chart_data
-                chart_data = fetch_chart_data(sym, idx)
-            threading.Thread(target=fetch, daemon=True).start()
-        elif ch == curses.KEY_UP and stock_index > 0:
-            stock_index -= 1
-            chart_symbol = sstocks[stock_index]
-            idx = chart_period
-            sym = chart_symbol
-            def fetch():
-                global chart_data
-                chart_data = fetch_chart_data(sym, idx)
-            threading.Thread(target=fetch, daemon=True).start()
-        elif ch == curses.KEY_DOWN and stock_index < total - 1:
-            stock_index += 1
-            chart_symbol = sstocks[stock_index]
-            idx = chart_period
-            sym = chart_symbol
-            def fetch():
-                global chart_data
-                chart_data = fetch_chart_data(sym, idx)
-            threading.Thread(target=fetch, daemon=True).start()
-        elif ch == curses.KEY_RIGHT and chart_data:
-            chart_cursor = (chart_cursor + 1) % len(chart_data)
-        elif ch == curses.KEY_LEFT and chart_data:
-            chart_cursor = (chart_cursor - 1) % len(chart_data)
-        return True
-
-    if input_mode != INPUT_NONE:
-        if is_exit_key(ch):
-            input_mode = INPUT_NONE; input_buffer = ""
-        elif input_mode == INPUT_DELETE_CONFIRM:
-            if (ch == ord('y') or ch == ord('Y')
-                    or ch == 10 or ch == curses.KEY_ENTER):
-                sstocks = get_sorted_stocks()
-                if sstocks and 0 <= stock_index < len(sstocks):
-                    sym = sstocks[stock_index]
-                    idx = stocks.index(sym) if sym in stocks else -1
-                    if idx >= 0: remove_stock(idx)
-            input_mode = INPUT_NONE; input_buffer = ""
-        elif ch == 10 or ch == curses.KEY_ENTER:
-            if input_mode == INPUT_SEARCH and input_buffer:
-                words = input_buffer.strip().split()
-                if len(words) > 1:
-                    added = sum(1 for word in words if add_stock(word))
-                    if added > 0: trigger_fetch()
-                else:
-                    search_results = search_stocks(input_buffer.strip())
-                    search_index = 0
-                    if search_results:
-                        symbols = [r['symbol'] for r in search_results]
-                        prices = fetch_stock_data(symbols)
-                        for r in search_results: r['data'] = prices.get(r['symbol'])
-            input_mode = INPUT_NONE; input_buffer = ""
-        elif (ch == curses.KEY_BACKSPACE
-              or ch == 127 or ch == 8): input_buffer = input_buffer[:-1]
-        elif 32 <= ch <= 126: input_buffer += chr(ch)
-        return True
-
-    # Settings mode
-    if settings_mode:
-        if is_exit_key(ch): settings_mode = False
-        elif ch == curses.KEY_UP and settings_index > 0: settings_index -= 1
-        elif (ch == curses.KEY_DOWN
-              and settings_index < len(ALL_COLUMNS) - 1): settings_index += 1
-        elif ch == ord(' '):
-            key = ALL_COLUMNS[settings_index][0]
-            if key != 'symbol':
-                if key in visible_columns: visible_columns.remove(key)
-                else: visible_columns.append(key)
-                save_settings()
-        return True
-
-    # Search results mode
-    if search_results:
-        if is_exit_key(ch): search_results = []; search_index = 0
-        elif ch == curses.KEY_UP and search_index > 0: search_index -= 1
-        elif (ch == curses.KEY_DOWN
-              and search_index < len(search_results) - 1): search_index += 1
-        elif ch == 10 or ch == curses.KEY_ENTER:
-            if 0 <= search_index < len(search_results):
-                sym = search_results[search_index].get('symbol', '')
-                if sym and not in_watchlist(sym): add_stock(sym); trigger_fetch()
-        return True
-
-    # Normal mode
-    if is_exit_key(ch): cleanup(0, 0)
-    elif (ch == ord('a') or ch == ord('A')
-          or ch == ord('/')): input_mode = INPUT_SEARCH; input_buffer = ""
+    if is_exit_key(ch):
+        cleanup(0, 0)
+    elif ch == ord('a') or ch == ord('A') or ch == ord('/'):
+        input_mode = INPUT_SEARCH
+        input_buffer = ""
     elif ch == ord('d') or ch == ord('D'):
         if sstocks and 0 <= stock_index < len(sstocks):
-            input_mode = INPUT_DELETE_CONFIRM; input_buffer = ""
-    elif ch == 9:
+            input_mode = INPUT_DELETE_CONFIRM
+            input_buffer = ""
+    elif ch == 9:  # Tab
         cols = get_visible_columns()
-        if sort_mode == SORT_NONE: sort_mode = SORT_UP
+        if sort_mode == SORT_NONE:
+            sort_mode = SORT_UP
         sort_column = (sort_column + 1) % len(cols)
         save_settings()
-    elif ch == ord('c') or ch == ord('C'): settings_mode = True; settings_index = 0
-    elif ch == ord('s') or ch == ord('S'): sort_mode = (sort_mode + 1) % 3; save_settings()
-    elif ch == curses.KEY_UP and stock_index > 0: stock_index -= 1
-    elif ch == curses.KEY_DOWN and stock_index < total - 1: stock_index += 1
-    elif ch == curses.KEY_PPAGE: stock_index = max(0, stock_index - 10)
-    elif ch == curses.KEY_NPAGE: stock_index = min(total - 1, stock_index + 10) if total > 0 else 0
-    elif ch == curses.KEY_HOME: stock_index = 0; scroll_offset = 0
-    elif ch == curses.KEY_END: stock_index = max(0, total - 1)
-    elif ch == 10 or ch == curses.KEY_ENTER:
+    elif ch == ord('c') or ch == ord('C'):
+        settings_mode = True
+        settings_index = 0
+    elif ch == ord('s') or ch == ord('S'):
+        sort_mode = (sort_mode + 1) % 3
+        save_settings()
+    elif ch == curses.KEY_UP and stock_index > 0:
+        stock_index -= 1
+    elif ch == curses.KEY_DOWN and stock_index < total - 1:
+        stock_index += 1
+    elif ch == curses.KEY_PPAGE:
+        stock_index = max(0, stock_index - 10)
+    elif ch == curses.KEY_NPAGE:
+        stock_index = min(total - 1, stock_index + 10) if total > 0 else 0
+    elif ch == curses.KEY_HOME:
+        stock_index = 0
+        scroll_offset = 0
+    elif ch == curses.KEY_END:
+        stock_index = max(0, total - 1)
+    elif is_enter_key(ch):
         if sstocks and 0 <= stock_index < len(sstocks):
             chart_symbol = sstocks[stock_index]
             chart_data = []
             chart_mode = True
-            def fetch():
-                global chart_data
-                chart_data = fetch_chart_data(chart_symbol, chart_period)
-            threading.Thread(target=fetch, daemon=True).start()
+            start_chart_fetch(chart_symbol, chart_period)
+
+def handle_input(ch):
+    if chart_mode:
+        handle_chart_input(ch)
+        return True
+    if input_mode != INPUT_NONE:
+        handle_input_mode(ch)
+        return True
+    if settings_mode:
+        handle_settings_input(ch)
+        return True
+    if search_results:
+        handle_search_results_input(ch)
+        return True
+    handle_normal_input(ch)
     return False
-#end
 
 ################################################################################
-# Main update loop
+# Main loop
 ################################################################################
 
 fetch_lock = threading.Lock()
 fetch_trigger = threading.Event()
 
-# Background thread for fetching stock data
 def fetch_worker():
     global initial_load
     while True:
         fetch_trigger.wait()
         fetch_trigger.clear()
-        if not stocks: continue
+        if not stocks:
+            continue
         data = fetch_stock_data(stocks)
         with fetch_lock:
             for sym in stocks:
                 info = data.get(sym)
-                if info: stdata[sym] = info
-                elif sym not in stdata: stdata[sym] = None
+                if info:
+                    stdata[sym] = info
+                elif sym not in stdata:
+                    stdata[sym] = None
         initial_load = False
-        time.sleep(2)  # min 2s between fetches
-#end
+        time.sleep(2)
 
-def trigger_fetch(): fetch_trigger.set()
+def trigger_fetch():
+    fetch_trigger.set()
 
 def update(win):
     win.erase()
-    if not chart_mode: print_header(win); print_columns(win)
+    if not chart_mode:
+        print_header(win)
+        print_columns(win)
     print_stocks(win)
     print_menu(win)
     win.refresh()
-#end
 
 ################################################################################
 # Main
@@ -1061,7 +1055,6 @@ def main():
     init_curses()
     log = open(".crash", "a")
 
-    # Start background fetch thread
     load_start_time = time.time()
     threading.Thread(target=fetch_worker, daemon=True).start()
     trigger_fetch()
@@ -1071,18 +1064,18 @@ def main():
     try:
         while True:
             ch = win.getch()
-            if ch > 0: handle_input(ch)
-            # Trigger fetch every 2 seconds
+            if ch > 0:
+                handle_input(ch)
             if time.time() - last_fetch > 2:
                 trigger_fetch()
                 last_fetch = time.time()
             update(win)
-    except:
+    except Exception:
         log.write(traceback.format_exc())
         log.write('------\n')
     finally:
         log.close()
         cleanup(0, 0)
-#end
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
