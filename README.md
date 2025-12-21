@@ -51,4 +51,3 @@ stock                          # use saved watchlist from ~/.stocks
 ## Requirements
 
 - Python 3
-- No external dependencies (stdlib only)
