@@ -9,7 +9,6 @@ Terminal-based stock market monitor using curses.
 
 ```
 cp stock /usr/local/bin/
-chmod +x /usr/local/bin/stock
 ```
 
 ## Usage
