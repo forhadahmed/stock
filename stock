@@ -17,6 +17,7 @@ import curses
 import calendar
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -44,7 +45,15 @@ def is_market_open():
                  or (10 <= now_et.hour < 16)))
 
 def in_watchlist(symbol):
-    return symbol.upper() in [s.upper() for s in stocks]
+    return symbol.upper() in stocks_set
+
+def invalidate_sorted_cache():
+    global _sorted_stocks_valid
+    _sorted_stocks_valid = False
+
+def invalidate_columns_cache():
+    global _visible_columns_valid
+    _visible_columns_valid = False
 
 def make_request(url):
     req = Request(url)
@@ -57,16 +66,19 @@ def get_change_color(value, selected):
     return curses.color_pair(COLOR_GREEN) if value >= 0 else curses.color_pair(COLOR_RED)
 
 def load_settings():
-    global stocks, visible_columns, sort_column, sort_mode
+    global stocks, stocks_set, visible_columns, sort_column, sort_mode
     if not SETTINGS_FILE.exists():
         return
     try:
         with open(SETTINGS_FILE) as f:
             data = json.load(f)
             stocks = data.get('stocks', [])
+            stocks_set = {s.upper() for s in stocks}
             visible_columns = data.get('columns', visible_columns)
             sort_column = data.get('sort_column', 0)
             sort_mode = data.get('sort_mode', 0)
+            invalidate_sorted_cache()
+            invalidate_columns_cache()
     except Exception:
         pass
 
@@ -121,40 +133,48 @@ def set_cached_chart(symbol, period_idx, data):
 # Yahoo Finance API
 ################################################################################
 
+def fetch_single_stock(sym):
+    """Fetch data for a single stock symbol."""
+    try:
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{sym.upper()}?interval=1d&range=1d'
+        resp = urlopen(make_request(url), timeout=10)
+        data = json.loads(resp.read().decode('utf-8'))
+        chart = data.get('chart', {}).get('result', [{}])[0]
+        meta = chart.get('meta', {})
+        indicators = chart.get('indicators', {}).get('quote', [{}])[0]
+        price = meta.get('regularMarketPrice', 0) or 0
+        prev_close = meta.get('chartPreviousClose', price) or price
+        change = price - prev_close if price and prev_close else 0
+        change_pct = (change / prev_close * 100) if prev_close else 0
+        open_prices = indicators.get('open', [])
+        open_price = open_prices[-1] if open_prices and open_prices[-1] else prev_close
+        return sym, {
+            'symbol': sym.upper(),
+            'name': meta.get('shortName', sym.upper()),
+            'price': price,
+            'change': change,
+            'change_pct': change_pct,
+            'prev_close': prev_close,
+            'open': open_price or 0,
+            'day_low': meta.get('regularMarketDayLow', 0) or 0,
+            'day_high': meta.get('regularMarketDayHigh', 0) or 0,
+            'volume': meta.get('regularMarketVolume', 0) or 0,
+            'week52_low': meta.get('fiftyTwoWeekLow', 0) or 0,
+            'week52_high': meta.get('fiftyTwoWeekHigh', 0) or 0,
+        }
+    except Exception:
+        return sym, None
+
 def fetch_stock_data(symbols):
+    """Fetch data for multiple symbols in parallel."""
     if not symbols:
         return {}
     result = {}
-    for sym in symbols:
-        try:
-            url = f'https://query1.finance.yahoo.com/v8/finance/chart/{sym.upper()}?interval=1d&range=1d'
-            resp = urlopen(make_request(url), timeout=10)
-            data = json.loads(resp.read().decode('utf-8'))
-            chart = data.get('chart', {}).get('result', [{}])[0]
-            meta = chart.get('meta', {})
-            indicators = chart.get('indicators', {}).get('quote', [{}])[0]
-            price = meta.get('regularMarketPrice', 0) or 0
-            prev_close = meta.get('chartPreviousClose', price) or price
-            change = price - prev_close if price and prev_close else 0
-            change_pct = (change / prev_close * 100) if prev_close else 0
-            open_prices = indicators.get('open', [])
-            open_price = open_prices[-1] if open_prices and open_prices[-1] else prev_close
-            result[sym] = {
-                'symbol': sym.upper(),
-                'name': meta.get('shortName', sym.upper()),
-                'price': price,
-                'change': change,
-                'change_pct': change_pct,
-                'prev_close': prev_close,
-                'open': open_price or 0,
-                'day_low': meta.get('regularMarketDayLow', 0) or 0,
-                'day_high': meta.get('regularMarketDayHigh', 0) or 0,
-                'volume': meta.get('regularMarketVolume', 0) or 0,
-                'week52_low': meta.get('fiftyTwoWeekLow', 0) or 0,
-                'week52_high': meta.get('fiftyTwoWeekHigh', 0) or 0,
-            }
-        except Exception:
-            result[sym] = None
+    with ThreadPoolExecutor(max_workers=min(10, len(symbols))) as executor:
+        futures = {executor.submit(fetch_single_stock, sym): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym, data = future.result()
+            result[sym] = data
     return result
 
 ################################################################################
@@ -167,11 +187,18 @@ COLOR_GREEN = None
 COLOR_CYAN = None
 
 stocks = []
+stocks_set = set()  # for fast lookup
 stdata = {}
 scroll_offset = 0
 stock_index = 0
 sort_column = 0
 sort_mode = 0  # 0=none, 1=asc, 2=desc
+
+# Caches
+_sorted_stocks_cache = None
+_sorted_stocks_valid = False
+_visible_columns_cache = None
+_visible_columns_valid = False
 
 INPUT_NONE = 0
 INPUT_SEARCH = 1
@@ -287,23 +314,27 @@ def calibrate_delta():
 ################################################################################
 
 def add_stock(symbol):
-    global stocks
+    global stocks, stocks_set
     sym = symbol.strip().upper()
     if sym and not in_watchlist(sym):
         stocks.append(sym)
+        stocks_set.add(sym)
+        invalidate_sorted_cache()
         save_settings()
         return True
     return False
 
 def remove_stock(index):
-    global stocks, stock_index
+    global stocks, stocks_set, stock_index
     if 0 <= index < len(stocks):
         sym = stocks[index]
         stocks.pop(index)
+        stocks_set.discard(sym)
         if sym in stdata:
             del stdata[sym]
         if stock_index >= len(stocks):
             stock_index = max(0, len(stocks) - 1)
+        invalidate_sorted_cache()
         save_settings()
         return True
     return False
@@ -344,14 +375,26 @@ def search_stocks(query):
         return []
 
 def get_visible_columns():
-    return [(k, h, w) for k, h, w in ALL_COLUMNS if k in visible_columns]
+    global _visible_columns_cache, _visible_columns_valid
+    if _visible_columns_valid and _visible_columns_cache is not None:
+        return _visible_columns_cache
+    _visible_columns_cache = [(k, h, w) for k, h, w in ALL_COLUMNS if k in visible_columns]
+    _visible_columns_valid = True
+    return _visible_columns_cache
 
 def get_sorted_stocks():
+    global _sorted_stocks_cache, _sorted_stocks_valid
+    if _sorted_stocks_valid and _sorted_stocks_cache is not None:
+        return _sorted_stocks_cache
     if sort_mode == SORT_NONE:
-        return stocks
+        _sorted_stocks_cache = stocks
+        _sorted_stocks_valid = True
+        return _sorted_stocks_cache
     cols = get_visible_columns()
     if sort_column >= len(cols):
-        return stocks
+        _sorted_stocks_cache = stocks
+        _sorted_stocks_valid = True
+        return _sorted_stocks_cache
     sort_key = cols[sort_column][0]
 
     def get_key(sym):
@@ -362,7 +405,9 @@ def get_sorted_stocks():
             return 0
         return info.get(sort_key, 0)
 
-    return sorted(stocks, key=get_key, reverse=(sort_mode == SORT_DOWN))
+    _sorted_stocks_cache = sorted(stocks, key=get_key, reverse=(sort_mode == SORT_DOWN))
+    _sorted_stocks_valid = True
+    return _sorted_stocks_cache
 
 ################################################################################
 # Chart data and rendering
@@ -847,6 +892,7 @@ def handle_chart_input(ch):
         chart_mode = False
         chart_data = []
         chart_cursor = -1
+        trigger_fetch()  # resume full watchlist fetch
     elif ch == 9:  # Tab
         chart_period = (chart_period + 1) % len(CHART_PERIODS)
         chart_cursor = -1
@@ -855,10 +901,12 @@ def handle_chart_input(ch):
         stock_index -= 1
         chart_symbol = sstocks[stock_index]
         start_chart_fetch(chart_symbol, chart_period)
+        trigger_fetch()  # fetch quote data for new stock
     elif ch == curses.KEY_DOWN and stock_index < total - 1:
         stock_index += 1
         chart_symbol = sstocks[stock_index]
         start_chart_fetch(chart_symbol, chart_period)
+        trigger_fetch()  # fetch quote data for new stock
     elif ch == curses.KEY_RIGHT and chart_data:
         chart_cursor = (chart_cursor + 1) % len(chart_data)
     elif ch == curses.KEY_LEFT and chart_data:
@@ -916,6 +964,8 @@ def handle_settings_input(ch):
                 visible_columns.remove(key)
             else:
                 visible_columns.append(key)
+            invalidate_columns_cache()
+            invalidate_sorted_cache()  # sort may depend on visible columns
             save_settings()
 
 def handle_search_results_input(ch):
@@ -956,12 +1006,14 @@ def handle_normal_input(ch):
         if sort_mode == SORT_NONE:
             sort_mode = SORT_UP
         sort_column = (sort_column + 1) % len(cols)
+        invalidate_sorted_cache()
         save_settings()
     elif ch == ord('c') or ch == ord('C'):
         settings_mode = True
         settings_index = 0
     elif ch == ord('s') or ch == ord('S'):
         sort_mode = (sort_mode + 1) % 3
+        invalidate_sorted_cache()
         save_settings()
     elif ch == curses.KEY_UP and stock_index > 0:
         stock_index -= 1
@@ -1013,14 +1065,20 @@ def fetch_worker():
         fetch_trigger.clear()
         if not stocks:
             continue
-        data = fetch_stock_data(stocks)
+        # In chart mode, only fetch the charted stock
+        if chart_mode and chart_symbol:
+            symbols_to_fetch = [chart_symbol]
+        else:
+            symbols_to_fetch = stocks
+        data = fetch_stock_data(symbols_to_fetch)
         with fetch_lock:
-            for sym in stocks:
+            for sym in symbols_to_fetch:
                 info = data.get(sym)
                 if info:
                     stdata[sym] = info
                 elif sym not in stdata:
                     stdata[sym] = None
+            invalidate_sorted_cache()  # prices changed, re-sort needed
         initial_load = False
         time.sleep(2)
 
@@ -1041,7 +1099,7 @@ def update(win):
 ################################################################################
 
 def main():
-    global win, stocks, load_start_time
+    global win, stocks, stocks_set, load_start_time
 
     calibrate_delta()
     load_settings()
@@ -1049,6 +1107,8 @@ def main():
 
     if len(sys.argv) > 1:
         stocks = [s.upper() for s in sys.argv[1:]]
+        stocks_set = {s.upper() for s in stocks}
+        invalidate_sorted_cache()
         save_settings()
 
     if not stocks:
