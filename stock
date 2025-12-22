@@ -210,6 +210,7 @@ chart_symbol = ""
 chart_data = []
 chart_period = 0
 chart_cursor = -1
+chart_last_fetch = 0
 
 initial_load = True
 load_start_time = 0
@@ -388,6 +389,8 @@ def fetch_chart_data(symbol, period_idx=0):
 
 def start_chart_fetch(symbol, period_idx):
     """Start async fetch of chart data."""
+    global chart_last_fetch
+    chart_last_fetch = time.time()
     def fetch():
         global chart_data
         chart_data = fetch_chart_data(symbol, period_idx)
@@ -600,7 +603,7 @@ def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, char
 
     levels = get_price_levels(pmin, pmax, 3)
     prange = pmax - pmin if pmax > pmin else 1
-    level_rows = set()
+    level_rows = {0}  # include top row
     for lvl in levels:
         row_y = int((pmax - lvl) / prange * (len(rows) - 1)) if prange > 0 else 0
         level_rows.add(row_y)
@@ -626,7 +629,8 @@ def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, char
         try:
             win.addstr(y, 1, label.rjust(10), curses.A_DIM)
             if i in level_rows:
-                win.addstr(y, chart_x, "┄" * chart_w, curses.A_DIM)
+                dotted = "⠄" * chart_w
+                win.addstr(y, chart_x, dotted, curses.A_DIM)
             for cx, ch in enumerate(row):
                 if ch != chr(BRAILLE_BASE):
                     color = curses.color_pair(COLOR_GREEN) if change >= 0 else curses.color_pair(COLOR_RED)
@@ -636,7 +640,7 @@ def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, char
         except curses.error:
             pass
 
-    # Live marker
+    # Live marker (blinks by toggling every 0.5s)
     if is_market_open() and chart_period == 0 and chart_data:
         try:
             vals = [p for _, p in chart_data]
@@ -646,8 +650,9 @@ def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, char
             marker_y = chart_y + marker_row
             marker_x = chart_x + chart_w - 1
             if 0 <= marker_row < len(rows) and marker_y < h - 2:
-                color = curses.color_pair(COLOR_GREEN) if change >= 0 else curses.color_pair(COLOR_RED)
-                win.addstr(marker_y, marker_x, "●", color | curses.A_BOLD)
+                blink_on = int(time.time()) % 2 == 0
+                if blink_on:
+                    win.addstr(marker_y, marker_x, "●", curses.A_BOLD)
         except curses.error:
             pass
 
@@ -776,9 +781,10 @@ def print_stocks(win):
                     val = info.get(key, 0)
                     if key in ('price', 'day_low', 'day_high', 'open',
                                'prev_close', 'week52_low', 'week52_high'):
-                        val_str = f"${val:.2f}"
+                        val_str = f"${val:,.0f}" if val >= 1000 else f"${val:,.2f}"
                     elif key == 'change':
-                        val_str = f"+${val:.2f}" if val >= 0 else f"-${abs(val):.2f}"
+                        fmt = ".0f" if abs(val) >= 1000 else ".2f"
+                        val_str = f"+${val:{fmt}}" if val >= 0 else f"-${abs(val):{fmt}}"
                         color = get_change_color(val, selected)
                     elif key == 'change_pct':
                         val_str = f"+{val:.2f}%" if val >= 0 else f"{val:.2f}%"
@@ -1064,9 +1070,13 @@ def main():
             ch = win.getch()
             if ch > 0:
                 handle_input(ch)
-            if time.time() - last_fetch > 2:
+            if time.time() - last_fetch > 5:
                 trigger_fetch()
                 last_fetch = time.time()
+            # Refresh 1D chart every 5 seconds during market hours
+            if chart_mode and chart_period == 0 and is_market_open():
+                if time.time() - chart_last_fetch > 5:
+                    start_chart_fetch(chart_symbol, chart_period)
             update(win)
     finally:
         cleanup(0, 0)
