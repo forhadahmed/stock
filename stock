@@ -1118,7 +1118,6 @@ def main():
     if not stocks:
         print("Usage: stock [symbol1] [symbol2] ...")
         print("Example: stock aapl goog msft")
-        print("Stocks are saved to ~/.stocks for persistence")
         sys.exit(1)
 
     init_curses()
