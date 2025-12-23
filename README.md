@@ -3,7 +3,7 @@ stock
 
 Terminal-based stock market monitor using curses.
 
-![Demo](https://raw.githubusercontent.com/forhadahmed/stock/master/demo.gif)
+![Demo](https://github.com/forhadahmed/stock/releases/download/v1.0/demo.gif)
 
 ## Installation
 
