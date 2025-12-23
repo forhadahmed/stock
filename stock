@@ -185,6 +185,7 @@ win = None
 COLOR_RED = None
 COLOR_GREEN = None
 COLOR_CYAN = None
+COLOR_DARK = None
 
 stocks = []
 stocks_set = set()  # for fast lookup
@@ -268,13 +269,12 @@ def cleanup(sig, fr):
             curses.endwin()
         except Exception:
             pass
-    print("[quit]")
     sys.exit()
 
 signal.signal(signal.SIGINT, cleanup)
 
 def init_curses():
-    global win, COLOR_RED, COLOR_GREEN, COLOR_CYAN
+    global win, COLOR_RED, COLOR_GREEN, COLOR_CYAN, COLOR_DARK
     win = curses.initscr()
     curses.noecho()
     curses.halfdelay(1)
@@ -284,7 +284,8 @@ def init_curses():
     curses.init_pair(1, curses.COLOR_RED, -1)
     curses.init_pair(2, curses.COLOR_GREEN, -1)
     curses.init_pair(3, curses.COLOR_CYAN, -1)
-    COLOR_RED, COLOR_GREEN, COLOR_CYAN = 1, 2, 3
+    curses.init_pair(4, 242, -1)  # light gray (256-color)
+    COLOR_RED, COLOR_GREEN, COLOR_CYAN, COLOR_DARK = 1, 2, 3, 4
     try:
         curses.curs_set(0)
     except Exception:
@@ -674,8 +675,8 @@ def print_chart_body(win, h, w, rows, pmin, pmax, change, chart_x, chart_y, char
         try:
             win.addstr(y, 1, label.rjust(10), curses.A_DIM)
             if i in level_rows:
-                dotted = "⠄" * chart_w
-                win.addstr(y, chart_x, dotted, curses.A_DIM)
+                dotted = "⠤" * chart_w
+                win.addstr(y, chart_x, dotted, curses.color_pair(COLOR_DARK))
             for cx, ch in enumerate(row):
                 if ch != chr(BRAILLE_BASE):
                     color = curses.color_pair(COLOR_GREEN) if change >= 0 else curses.color_pair(COLOR_RED)
