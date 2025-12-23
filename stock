@@ -914,7 +914,11 @@ def handle_chart_input(ch):
 
 def handle_input_mode(ch):
     global input_mode, input_buffer, search_results, search_index
-    if is_exit_key(ch):
+    # In search mode, only ESC exits (allow typing 'q')
+    if input_mode == INPUT_SEARCH and ch == 27:
+        input_mode = INPUT_NONE
+        input_buffer = ""
+    elif input_mode != INPUT_SEARCH and is_exit_key(ch):
         input_mode = INPUT_NONE
         input_buffer = ""
     elif input_mode == INPUT_DELETE_CONFIRM:
