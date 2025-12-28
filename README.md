@@ -4,7 +4,7 @@
 
 **A fast, terminal-based stock market monitor and portfolio tracker.** Real-time quotes, interactive braille charts, and persistent watchlists - all in your terminal with zero dependencies.
 
-![Demo](https://github.com/forhadahmed/stock/releases/download/v1.0/demo.gif)
+**[View Demo](https://github.com/forhadahmed/stock/releases/download/v1.0/demo.cast)** (asciinema recording - play with `asciinema play demo.cast`)
 
 ## Features
 
