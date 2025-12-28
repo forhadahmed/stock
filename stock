@@ -1111,10 +1111,26 @@ def main():
     load_cache()
 
     if len(sys.argv) > 1:
-        stocks = [s.upper() for s in sys.argv[1:]]
-        stocks_set = {s.upper() for s in stocks}
-        invalidate_sorted_cache()
-        save_settings()
+        new_stocks = [s.upper() for s in sys.argv[1:]]
+        if stocks and set(new_stocks) != stocks_set:
+            print(f"Saved watchlist: {', '.join(stocks)}")
+            print(f"New list: {', '.join(new_stocks)}")
+            try:
+                resp = input("Replace saved watchlist? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                resp = ''
+            if resp != 'y':
+                print("Using saved watchlist.")
+            else:
+                stocks = new_stocks
+                stocks_set = set(new_stocks)
+                invalidate_sorted_cache()
+                save_settings()
+        else:
+            stocks = new_stocks
+            stocks_set = set(new_stocks)
+            invalidate_sorted_cache()
+            save_settings()
 
     if not stocks:
         print("Usage: stock [symbol1] [symbol2] ...")
